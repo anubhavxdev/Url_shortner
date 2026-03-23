@@ -1,4 +1,4 @@
-import { getShortUrl } from "../dao/short_url.js"
+import { getShortUrl, deleteShortUrlDao } from "../dao/short_url.js"
 import { createShortUrlWithoutUser, createShortUrlWithUser } from "../services/short_url.service.js"
 import wrapAsync from "../utils/tryCatchWrapper.js"
 
@@ -11,6 +11,14 @@ export const createShortUrl = wrapAsync(async (req,res)=>{
         shortUrl = await createShortUrlWithoutUser(data.url)
     }
     res.status(200).json({shortUrl : process.env.APP_URL + shortUrl})
+})
+
+export const deleteShortUrl = wrapAsync(async (req,res)=>{
+    const {short_url} = req.params;
+    const userId = req.user._id;
+    const deleted = await deleteShortUrlDao(short_url, userId);
+    if(!deleted) return res.status(404).json({message: "Short URL not found or unauthorized"});
+    res.status(200).json({message: "Short URL deleted successfully"});
 })
 
 
