@@ -1,0 +1,680 @@
+URL SHORTENER BACKEND - DETAILED TECHNICAL DOCUMENTATION
+Generated on: 2026-03-23
+Project root: Url_shortner/BACKEND
+
+====================================================================
+1) OVERVIEW
+====================================================================
+
+This backend is an Express + MongoDB application for URL shortening with optional user authentication.
+
+Core capabilities:
+- Create short URLs (guest users allowed).
+- Create short URLs tied to authenticated users.
+- Redirect from short URL to original URL.
+- User registration/login/logout with JWT in HTTP-only cookies.
+- Fetch all URLs created by a logged-in user.
+
+Architecture style:
+- Layered architecture:
+  - Routes (HTTP mapping)
+  - Controllers (request/response orchestration)
+  - Services (business logic)
+  - DAO (database access)
+  - Models (Mongoose schemas)
+  - Middleware + Utils (cross-cutting concerns)
+
+====================================================================
+2) TECHNOLOGY STACK
+====================================================================
+
+Runtime and framework:
+- Node.js (ES modules enabled)
+- Express 5
+
+Database:
+- MongoDB
+- Mongoose
+
+Security/Auth:
+- JSON Web Token (jsonwebtoken)
+- bcryptjs for password hashing
+- cookie-parser for reading auth cookies
+- CORS with credentials enabled
+
+Utilities:
+- nanoid for short code generation
+- dotenv for environment variable loading
+- nodemon for development restart
+
+Package definition source:
+- BACKEND/package.json
+
+====================================================================
+3) FOLDER STRUCTURE (BACKEND)
+====================================================================
+
+BACKEND/
+- app.js
+- .env
+- package.json
+- package-lock.json
+- src/
+  - config/
+    - config.js
+    - monogo.config.js
+  - controller/
+    - auth.controller.js
+    - short_url.controller.js
+    - user.controller.js
+  - dao/
+    - short_url.js
+    - user.dao.js
+  - middleware/
+    - auth.middleware.js
+  - models/
+    - short_url.model.js
+    - user.model.js
+  - routes/
+    - auth.routes.js
+    - short_url.route.js
+    - user.routes.js
+  - services/
+    - auth.service.js
+    - short_url.service.js
+  - utils/
+    - attachUser.js
+    - errorHandler.js
+    - helper.js
+    - tryCatchWrapper.js
+
+====================================================================
+4) ENTRYPOINT + BOOTSTRAP
+====================================================================
+
+File: BACKEND/app.js
+
+Responsibilities:
+- Imports core dependencies and local modules.
+- Loads environment variables using dotenv.
+- Creates Express app instance.
+- Configures middleware stack.
+- Mounts route modules.
+- Defines public redirect route.
+- Registers global error handler.
+- Starts HTTP server and connects MongoDB.
+
+Important middleware order in app.js:
+1. cors(...)
+2. express.json()
+3. express.urlencoded({ extended: true })
+4. cookieParser()
+5. attachUser
+6. API routes
+7. Redirect route (/:id)
+8. errorHandler
+
+CORS settings:
+- origin: http://localhost:5173
+- credentials: true
+This allows frontend on Vite dev server to send and receive cookies.
+
+Listening:
+- Port: 3000
+- connectDB() called inside app.listen callback.
+
+====================================================================
+5) ENVIRONMENT VARIABLES
+====================================================================
+
+File: BACKEND/.env
+
+Currently present:
+- MONGO_URI=mongodb://localhost:27017/url-shortner
+- APP_URL=http://localhost:3000/
+- JWT_SECRET="thisisasecretkey"
+
+Usage:
+- MONGO_URI: Mongo connection string
+- APP_URL: Prefix used in API response when returning short URL
+- JWT_SECRET: Key for JWT sign/verify
+
+Notes:
+- APP_URL has spaces around '=' in file as shown; dotenv often tolerates this, but standard formatting without spaces is recommended.
+- JWT secret should be rotated if this repo is public/shared.
+
+====================================================================
+6) CONFIG LAYER
+====================================================================
+
+File: BACKEND/src/config/config.js
+
+Exports:
+- cookieOptions object:
+  - httpOnly: true
+  - secure: process.env.NODE_ENV === "production"
+  - sameSite: "Lax"
+  - maxAge: 1000 * 60 * 60 (1 hour)
+
+Used by auth controllers for set/clear cookie.
+
+Note:
+- Inline comment says "5 minutes" while maxAge value is 1 hour.
+
+------------------------------------------------------------
+
+File: BACKEND/src/config/monogo.config.js
+
+Purpose:
+- Connect to MongoDB using mongoose.connect.
+
+Behavior:
+- Logs process.env.MONGO_URI to console.
+- On success: logs host.
+- On failure: logs error and exits process with code 1.
+
+Connection options present:
+- useNewUrlParser: true
+- useUnifiedTopology: true
+
+Note:
+- In modern Mongoose versions these options are often unnecessary but generally harmless.
+
+====================================================================
+7) DATA MODELS (MONGOOSE)
+====================================================================
+
+File: BACKEND/src/models/user.model.js
+
+Schema fields:
+- name: String, required
+- email: String, required, unique
+- password: String, required, select: false
+- avatar: String, default gravatar placeholder
+
+Methods/hooks:
+- comparePassword(password): compares plain password with hashed password via bcrypt.compare.
+- pre("save") hook: hashes password with bcrypt.hash(..., 10) when password is modified.
+
+Serialization:
+- toJSON transform removes:
+  - password
+  - __v
+
+Model name:
+- User
+
+------------------------------------------------------------
+
+File: BACKEND/src/models/short_url.model.js
+
+Schema fields:
+- full_url: String, required
+- short_url: String, required, unique, indexed
+- clicks: Number, required, default 0
+- user: ObjectId ref "User" (optional)
+
+Model name:
+- shortUrl
+
+Behavior notes:
+- Each short code is globally unique.
+- URLs can be anonymous or linked to a user.
+
+====================================================================
+8) DAO LAYER (DATABASE ACCESS)
+====================================================================
+
+File: BACKEND/src/dao/user.dao.js
+
+Functions:
+1) findUserByEmail(email)
+   - User.findOne({ email })
+
+2) findUserByEmailByPassword(email)
+   - User.findOne({ email }).select('+password')
+   - Explicitly includes password for authentication checks.
+
+3) findUserById(id)
+   - User.findById(id)
+
+4) createUser(name, email, password)
+   - new User(...)
+   - save()
+   - returns new user document
+
+5) getAllUserUrlsDao(id)
+   - UrlModel.find({ user: id })
+
+Dependencies:
+- User model
+- Url model
+
+------------------------------------------------------------
+
+File: BACKEND/src/dao/short_url.js
+
+Functions:
+1) saveShortUrl(shortUrl, longUrl, userId)
+   - Creates new URL document with full_url and short_url
+   - Attaches user when provided
+   - save()
+   - Handles duplicate short_url error code 11000 -> throws ConflictError("Short URL already exists")
+
+2) getShortUrl(shortUrl)
+   - findOneAndUpdate({ short_url: shortUrl }, { $inc: { clicks: 1 } })
+   - increments click count while fetching
+
+3) getCustomShortUrl(slug)
+   - findOne({ short_url: slug })
+
+Important behavior:
+- Redirect lookups update analytics (click count).
+
+====================================================================
+9) SERVICE LAYER (BUSINESS LOGIC)
+====================================================================
+
+File: BACKEND/src/services/auth.service.js
+
+Functions:
+1) registerUser(name, email, password)
+   - Checks existing user by email
+   - Throws ConflictError if found
+   - Creates user via DAO
+   - Signs JWT with payload { id: newUser._id }
+   - returns { token, user }
+
+2) loginUser(email, password)
+   - Fetches user including password
+   - Throws generic Error for invalid credentials
+   - Compares password with user.comparePassword
+   - Signs JWT with payload { id: user._id }
+   - returns { token, user }
+
+Notes:
+- Error type for bad credentials is plain Error; not a custom UnauthorizedError.
+
+------------------------------------------------------------
+
+File: BACKEND/src/services/short_url.service.js
+
+Functions:
+1) createShortUrlWithoutUser(url)
+   - Generates 7-char nanoid
+   - Saves URL without user
+   - returns short code
+
+2) createShortUrlWithUser(url, userId, slug = null)
+   - Uses provided slug OR generated nanoid
+   - Checks slug existence via getCustomShortUrl(slug)
+   - Saves URL with user ID
+   - returns short code
+
+Potential issue:
+- Existence check runs even when slug is null. This is unnecessary and semantically odd.
+
+====================================================================
+10) CONTROLLER LAYER (HTTP HANDLERS)
+====================================================================
+
+File: BACKEND/src/controller/auth.controller.js
+
+All handlers wrapped with wrapAsync.
+
+Handlers:
+1) register_user(req, res)
+   - Reads name/email/password from req.body
+   - Calls registerUser service
+   - Sets req.user
+   - Sets cookie "accessToken" with cookieOptions
+   - Responds 200 { message: "register success" }
+
+2) login_user(req, res)
+   - Reads email/password from req.body
+   - Calls loginUser service
+   - Sets req.user
+   - Sets cookie "accessToken"
+   - Responds 200 { user, message: "login success" }
+
+3) logout_user(req, res)
+   - Clears cookie "accessToken"
+   - Responds 200 { message: "logout success" }
+
+4) get_current_user(req, res)
+   - Responds 200 { user: req.user }
+   - Route-protected by authMiddleware.
+
+------------------------------------------------------------
+
+File: BACKEND/src/controller/user.controller.js
+
+Handler:
+- getAllUserUrls(req, res)
+  - Reads req.user._id
+  - Calls getAllUserUrlsDao
+  - Responds 200 { message: "success", urls }
+
+------------------------------------------------------------
+
+File: BACKEND/src/controller/short_url.controller.js
+
+Handlers:
+1) createShortUrl(req, res)
+   - Reads req.body (expects at least url, optionally slug)
+   - If req.user exists (attached by attachUser), calls createShortUrlWithUser
+   - Else calls createShortUrlWithoutUser
+   - Responds 200 { shortUrl: process.env.APP_URL + shortUrl }
+
+2) redirectFromShortUrl(req, res)
+   - Reads req.params.id
+   - Calls getShortUrl(id)
+   - Throws Error if not found
+   - Redirects to url.full_url
+
+3) createCustomShortUrl(req, res)
+   - Present in file but not used by any route
+   - Contains bug: references customUrl variable that is not defined
+   - Calls createShortUrlWithoutUser(url, customUrl) but service signature does not match.
+
+====================================================================
+11) ROUTING LAYER
+====================================================================
+
+File: BACKEND/src/routes/auth.routes.js
+
+Mounted at /api/auth
+Routes:
+- POST /register -> register_user
+- POST /login -> login_user
+- POST /logout -> logout_user
+- GET /me -> authMiddleware -> get_current_user
+
+------------------------------------------------------------
+
+File: BACKEND/src/routes/user.routes.js
+
+Mounted at /api/user
+Routes:
+- POST /urls -> authMiddleware -> getAllUserUrls
+
+Note:
+- This is retrieval behavior; usually GET would be more RESTful.
+
+------------------------------------------------------------
+
+File: BACKEND/src/routes/short_url.route.js
+
+Mounted at /api/create
+Routes:
+- POST / -> createShortUrl
+
+Public redirect route is defined in app.js directly:
+- GET /:id -> redirectFromShortUrl
+
+====================================================================
+12) MIDDLEWARE
+====================================================================
+
+File: BACKEND/src/middleware/auth.middleware.js
+
+Purpose:
+- Strict authentication guard for protected routes.
+
+Behavior:
+- Reads token from req.cookies.accessToken
+- If no token -> 401 Unauthorized
+- Verifies token -> gets decoded ID
+- Finds user by ID
+- If missing/invalid -> 401
+- Else attaches req.user and next()
+
+Error response shape:
+- { message: "Unauthorized" }
+- On catch includes error object too.
+
+------------------------------------------------------------
+
+File: BACKEND/src/utils/attachUser.js
+
+Purpose:
+- Optional authentication middleware for all requests.
+
+Behavior:
+- Reads accessToken cookie
+- If absent -> next()
+- If present, verify token and fetch user
+- If valid user, sets req.user
+- Never blocks request if invalid; just continues
+
+Why useful:
+- Allows endpoint behavior to adapt based on login state without forcing auth.
+
+====================================================================
+13) UTILITIES
+====================================================================
+
+File: BACKEND/src/utils/helper.js
+
+Functions:
+- generateNanoId(length): returns nanoid(length)
+- signToken(payload): signs JWT with secret and 1h expiry
+- verifyToken(token): verifies JWT and returns decoded.id
+
+Notes:
+- verifyToken logs decoded.id to console every call.
+- cookieOptions is imported but unused in this file.
+
+------------------------------------------------------------
+
+File: BACKEND/src/utils/tryCatchWrapper.js
+
+Function:
+- wrapAsync(fn): wraps async route handlers and forwards rejections to next(error).
+
+This reduces repeated try/catch inside controllers.
+
+------------------------------------------------------------
+
+File: BACKEND/src/utils/errorHandler.js
+
+Exports:
+- errorHandler middleware
+- AppError base class
+- NotFoundError
+- ConflictError
+- BadRequestError
+- UnauthorizedError
+
+errorHandler behavior:
+- If err is AppError -> uses err.statusCode and err.message
+- Else -> returns 500 with err.message or fallback text
+
+Error JSON structure:
+- { success: false, message: ... }
+
+====================================================================
+14) API CONTRACT SUMMARY
+====================================================================
+
+A) Auth
+
+1) POST /api/auth/register
+Request body:
+- name (string)
+- email (string)
+- password (string)
+
+Response 200:
+- { message: "register success" }
+Side effects:
+- Sets accessToken cookie
+- Creates user document
+
+2) POST /api/auth/login
+Request body:
+- email
+- password
+
+Response 200:
+- { user, message: "login success" }
+Side effects:
+- Sets accessToken cookie
+
+3) POST /api/auth/logout
+Response 200:
+- { message: "logout success" }
+Side effects:
+- Clears accessToken cookie
+
+4) GET /api/auth/me (protected)
+Response 200:
+- { user }
+
+B) URL Management
+
+5) POST /api/create/
+Request body (guest):
+- url
+
+Request body (logged in):
+- url
+- optional slug
+
+Response 200:
+- { shortUrl: APP_URL + shortCode }
+
+Behavior:
+- Guest: random short code
+- Logged in: custom slug OR random short code, and stores owner user ID
+
+6) GET /:id
+Response:
+- HTTP redirect to original URL if found
+- Error if not found
+Side effects:
+- increments clicks counter
+
+C) User URLs
+
+7) POST /api/user/urls (protected)
+Response 200:
+- { message: "success", urls }
+
+====================================================================
+15) REQUEST LIFECYCLE EXAMPLES
+====================================================================
+
+Example 1: Login then create URL as authenticated user
+1. Client POST /api/auth/login
+2. Controller sets accessToken cookie
+3. Client POST /api/create with cookie attached
+4. Global attachUser reads cookie and sets req.user
+5. createShortUrl controller detects req.user and calls authenticated service path
+6. URL saved with user field
+7. Response returns full short URL
+
+Example 2: Anonymous create + redirect
+1. Client POST /api/create without cookie
+2. attachUser does nothing
+3. Service creates random code and stores URL
+4. User opens /<short-code>
+5. DAO finds URL + increments clicks
+6. Server redirects to full_url
+
+====================================================================
+16) DATA RELATIONSHIP
+====================================================================
+
+Collections:
+- users
+- shorturls (actual collection naming depends on mongoose pluralization)
+
+Relationship:
+- short_url.user references users._id
+- One user can have many short URLs
+
+====================================================================
+17) KNOWN ISSUES / CODE QUALITY FINDINGS
+====================================================================
+
+1) Unused/buggy custom URL handler
+- createCustomShortUrl is not routed and contains undefined variable customUrl.
+
+2) Slug existence check logic
+- createShortUrlWithUser checks slug existence even when slug is null.
+
+3) Mixed error class usage
+- Some auth/service errors use plain Error instead of AppError subclasses.
+
+4) Potential information leak in auth middleware
+- 401 catch response includes raw error object.
+
+5) Console logging sensitive operational details
+- Mongo URI printed during startup; token decoded id printed during verify.
+
+6) Route method semantics
+- /api/user/urls uses POST for retrieval-like operation.
+
+7) Comment/value mismatch
+- cookie maxAge value is 1h while comment says 5 minutes.
+
+8) Hardcoded app port
+- app listens on 3000 directly instead of env-driven configuration.
+
+====================================================================
+18) SECURITY OBSERVATIONS
+====================================================================
+
+Positive:
+- Passwords hashed with bcrypt before save.
+- Password excluded by default from query/JSON.
+- JWT stored in httpOnly cookie.
+- CORS credentials configured for known frontend origin.
+
+Needs attention:
+- JWT secret should not be weak or exposed in source-controlled .env.
+- Avoid returning raw internal error objects in API responses.
+- Consider stricter cookie settings for production (secure true in HTTPS, sameSite as needed).
+- Add validation/sanitization for URLs and slug format.
+
+====================================================================
+19) WHAT IS CURRENTLY CREATED (FUNCTIONAL SUMMARY)
+====================================================================
+
+Created and working components:
+- Express server bootstrap
+- MongoDB connection setup
+- User schema with password hashing and comparison
+- URL schema with click tracking and optional ownership
+- Auth register/login/logout/me endpoints
+- URL creation endpoint for guest and logged-in users
+- Redirect endpoint by short code
+- Endpoint to fetch URLs by user
+- Optional global user attachment middleware
+- Centralized async error wrapping and error handling utility classes
+
+Partially created / incomplete:
+- Custom short URL dedicated controller function exists but is broken and not connected to routes.
+
+====================================================================
+20) QUICK IMPROVEMENT ROADMAP (OPTIONAL)
+====================================================================
+
+Priority 1 (correctness):
+- Fix or remove createCustomShortUrl.
+- Correct slug check logic in createShortUrlWithUser.
+
+Priority 2 (security/hardening):
+- Remove sensitive console logs.
+- Improve auth error handling consistency.
+- Move port + origins to environment config.
+
+Priority 3 (API quality):
+- Add input validation (URL format, slug constraints).
+- Change /api/user/urls to GET if desired.
+- Add response consistency and standard error schema.
+
+====================================================================
+END OF DOCUMENT
+====================================================================
